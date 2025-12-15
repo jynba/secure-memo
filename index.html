@@ -139,7 +139,7 @@
     <!-- 密码输入弹窗 -->
     <div id="password-modal" class="modal-overlay" style="display: none">
       <div class="modal-content">
-        <h3>请输入密码</h3>
+        <h3 id="password-modal-title">请输入密码</h3>
         <input type="password" id="password-input" placeholder="首次输入即为设置密码" />
         <button id="password-submit">确认</button>
       </div>
@@ -162,7 +162,8 @@
     <script src="https://unpkg.com/localforage/dist/localforage.js"></script>
     <script>
       const STORAGE_KEY = "secure_notes";
-      const SALT_KEY = "secure_notes_salt";
+      const PWD_VERIFIER_KEY = "pwd_verifier";
+      const PWD_VERIFIER_TEXT = "password_correct";
 
       localforage.config({
         name: "secure-memo",
@@ -170,23 +171,34 @@
       });
 
       /* ================= 密码弹窗 ================= */
-      function showPasswordPrompt() {
-        return new Promise((resolve) => {
+      function showPasswordPrompt(isSettingPassword) {
+        return new Promise((resolve, reject) => {
           const modal = document.getElementById("password-modal");
+          const title = document.getElementById("password-modal-title");
           const input = document.getElementById("password-input");
           const submitBtn = document.getElementById("password-submit");
+
+          title.textContent = isSettingPassword ? "请设置您的密码" : "请输入密码";
+          input.placeholder = isSettingPassword ? "设置后请务必牢记" : "";
 
           modal.style.display = "flex";
           input.focus();
           input.value = "";
 
+          const cleanup = () => {
+            modal.style.display = "none";
+            submitBtn.removeEventListener("click", onConfirm);
+            document.removeEventListener("keydown", onKeydown);
+          };
+
           const onConfirm = () => {
             const pwd = input.value;
             if (pwd) {
-              modal.style.display = "none";
-              submitBtn.removeEventListener("click", onConfirm);
-              document.removeEventListener("keydown", onKeydown);
+              cleanup();
               resolve(pwd);
+            } else {
+              cleanup();
+              reject(new Error("密码不能为空"));
             }
           };
 
@@ -199,7 +211,7 @@
         });
       }
 
-      /* ================= 内容展示与编辑弹窗 (新) ================= */
+      /* ================= 内容展示与编辑弹窗 ================= */
       function showContentModal(initialText, noteId) {
         const modal = document.getElementById("content-modal");
         const title = document.getElementById("content-modal-title");
@@ -211,7 +223,6 @@
 
         let isEditing = false;
 
-        // 重置状态
         const setDisplayMode = (text) => {
           isEditing = false;
           title.textContent = "解密后的内容";
@@ -275,8 +286,7 @@
 
             try {
               const pwd = await getPassword();
-              const key = await getKey(pwd);
-              const newPayload = await encrypt(newText, key);
+              const newPayload = simpleEncrypt(newText, pwd);
 
               const notes = await loadNotes();
               const noteIndex = notes.findIndex((note) => note.id === noteId);
@@ -301,62 +311,51 @@
       /* ================= 密码 ================= */
       async function getPassword() {
         let pwd = sessionStorage.getItem("note_pwd");
-        if (!pwd) {
-          pwd = await showPasswordPrompt();
-          if (!pwd) throw new Error("需要密码");
-          sessionStorage.setItem("note_pwd", pwd);
+        if (pwd) return pwd;
+
+        const verifier = await localforage.getItem(PWD_VERIFIER_KEY);
+        const isSettingPassword = !verifier;
+
+        const enteredPwd = await showPasswordPrompt(isSettingPassword);
+
+        if (isSettingPassword) {
+          const newVerifier = simpleEncrypt(PWD_VERIFIER_TEXT, enteredPwd);
+          await localforage.setItem(PWD_VERIFIER_KEY, newVerifier);
+          sessionStorage.setItem("note_pwd", enteredPwd);
+          return enteredPwd;
+        } else {
+          try {
+            const decrypted = simpleDecrypt(verifier, enteredPwd);
+            if (decrypted === PWD_VERIFIER_TEXT) {
+              sessionStorage.setItem("note_pwd", enteredPwd);
+              return enteredPwd;
+            } else {
+              throw new Error("密码错误");
+            }
+          } catch (e) {
+            throw new Error("密码错误");
+          }
         }
-        return pwd;
       }
 
-      /* ================= Key 派生 ================= */
-      async function getKey(password) {
-        let salt = await localforage.getItem(SALT_KEY);
-
-        if (!salt) {
-          salt = crypto.getRandomValues(new Uint8Array(16));
-          await localforage.setItem(SALT_KEY, salt);
+      /* ================= 加解密 (简单版) ================= */
+      function simpleEncrypt(text, key) {
+        let result = "";
+        for (let i = 0; i < text.length; i++) {
+          const charCode = text.charCodeAt(i) ^ key.charCodeAt(i % key.length);
+          result += String.fromCharCode(charCode);
         }
-
-        if (salt instanceof ArrayBuffer) {
-          salt = new Uint8Array(salt);
-        } else if (Array.isArray(salt)) {
-          salt = new Uint8Array(salt);
-        }
-
-        const baseKey = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveKey"]);
-
-        return crypto.subtle.deriveKey(
-          {
-            name: "PBKDF2",
-            salt,
-            iterations: 100000,
-            hash: "SHA-256",
-          },
-          baseKey,
-          { name: "AES-GCM", length: 256 },
-          false,
-          ["encrypt", "decrypt"]
-        );
+        return btoa(encodeURIComponent(result));
       }
 
-      /* ================= 加解密 ================= */
-      async function encrypt(text, key) {
-        const iv = crypto.getRandomValues(new Uint8Array(12));
-        const data = new TextEncoder().encode(text);
-        const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, data);
-
-        return {
-          iv: btoa(String.fromCharCode(...iv)),
-          data: btoa(String.fromCharCode(...new Uint8Array(encrypted))),
-        };
-      }
-
-      async function decrypt(payload, key) {
-        const iv = Uint8Array.from(atob(payload.iv), (c) => c.charCodeAt(0));
-        const data = Uint8Array.from(atob(payload.data), (c) => c.charCodeAt(0));
-        const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, data);
-        return new TextDecoder().decode(decrypted);
+      function simpleDecrypt(encryptedText, key) {
+        const decodedText = decodeURIComponent(atob(encryptedText));
+        let result = "";
+        for (let i = 0; i < decodedText.length; i++) {
+          const charCode = decodedText.charCodeAt(i) ^ key.charCodeAt(i % key.length);
+          result += String.fromCharCode(charCode);
+        }
+        return result;
       }
 
       /* ================= 数据 ================= */
@@ -381,12 +380,11 @@
           li.onclick = async () => {
             try {
               const pwd = await getPassword();
-              const key = await getKey(pwd);
-              const text = await decrypt(n.payload, key);
+              const text = simpleDecrypt(n.payload, pwd);
               showContentModal(text, n.id);
             } catch (e) {
               console.error(e);
-              alert("密码错误或解密失败");
+              alert(e.message || "解密失败");
               sessionStorage.removeItem("note_pwd");
             }
           };
@@ -402,8 +400,7 @@
 
         try {
           const pwd = await getPassword();
-          const key = await getKey(pwd);
-          const payload = await encrypt(text, key);
+          const payload = simpleEncrypt(text, pwd);
 
           const notes = await loadNotes();
           notes.push({
@@ -417,7 +414,8 @@
           render();
         } catch (e) {
           console.error(e);
-          alert("加密失败，请重试");
+          alert(e.message || "加密失败，请重试");
+          sessionStorage.removeItem("note_pwd");
         }
       }
 
