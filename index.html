@@ -1,215 +1,429 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>加密云备忘录</title>
-  <style>
-    body {
-      margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #f7f7f7;
-    }
-    header {
-      padding: 12px 16px;
-      background: #ffffff;
-      font-weight: 600;
-      box-shadow: 0 1px 4px rgba(0,0,0,.06);
-    }
-    textarea {
-      width: 100%;
-      height: 120px;
-      border: none;
-      outline: none;
-      padding: 16px;
-      box-sizing: border-box;
-      font-size: 16px;
-      resize: none;
-    }
-    button {
-      margin: 12px 16px 0;
-      padding: 10px 14px;
-      border: none;
-      border-radius: 8px;
-      background: #000;
-      color: #fff;
-      font-size: 14px;
-    }
-    ul {
-      list-style: none;
-      padding: 0;
-      margin: 12px 0 0;
-    }
-    li {
-      background: #fff;
-      margin: 8px 12px;
-      padding: 12px;
-      border-radius: 10px;
-      font-size: 14px;
-    }
-    time {
-      display: block;
-      margin-top: 6px;
-      font-size: 12px;
-      color: #999;
-    }
-    .lock {
-      color: #666;
-      font-style: italic;
-    }
-  </style>
-</head>
-<body>
-  <header>🔐 加密云备忘录</header>
-
-  <textarea id="input" placeholder="写完后将被加密保存..."></textarea>
-  <button onclick="addNote()">加密保存</button>
-
-  <ul id="list"></ul>
-
-  <script src="https://unpkg.com/localforage/dist/localforage.js"></script>
-  <script>
-    const STORAGE_KEY = 'secure_notes';
-    const SALT_KEY = 'secure_notes_salt';
-
-    localforage.config({
-      name: 'secure-memo',
-      storeName: 'notes'
-    });
-
-    /* ================= 密码 ================= */
-    async function getPassword() {
-      let pwd = sessionStorage.getItem('note_pwd');
-      if (!pwd) {
-        pwd = prompt('请输入解密密码（首次即为设置密码）');
-        if (!pwd) throw new Error('需要密码');
-        sessionStorage.setItem('note_pwd', pwd);
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>加密云备忘录</title>
+    <style>
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #f7f7f7;
       }
-      return pwd;
-    }
-
-    /* ================= Key 派生（修复版） ================= */
-    async function getKey(password) {
-      let salt = await localforage.getItem(SALT_KEY);
-
-      if (!salt) {
-        salt = crypto.getRandomValues(new Uint8Array(16));
-        await localforage.setItem(SALT_KEY, salt);
+      header {
+        padding: 12px 16px;
+        background: #ffffff;
+        font-weight: 600;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
       }
-
-      // 兼容 localForage 不同 driver 的返回类型
-      if (salt instanceof ArrayBuffer) {
-        salt = new Uint8Array(salt);
-      } else if (Array.isArray(salt)) {
-        salt = new Uint8Array(salt);
+      textarea {
+        width: 100%;
+        height: 120px;
+        border: none;
+        outline: none;
+        padding: 16px;
+        box-sizing: border-box;
+        font-size: 16px;
+        resize: none;
       }
-
-      const baseKey = await crypto.subtle.importKey(
-        'raw',
-        new TextEncoder().encode(password),
-        'PBKDF2',
-        false,
-        ['deriveKey']
-      );
-
-      return crypto.subtle.deriveKey(
-        {
-          name: 'PBKDF2',
-          salt,
-          iterations: 100000,
-          hash: 'SHA-256'
-        },
-        baseKey,
-        { name: 'AES-GCM', length: 256 },
-        false,
-        ['encrypt', 'decrypt']
-      );
-    }
-
-    /* ================= 加解密 ================= */
-    async function encrypt(text, key) {
-      const iv = crypto.getRandomValues(new Uint8Array(12));
-      const data = new TextEncoder().encode(text);
-      const encrypted = await crypto.subtle.encrypt(
-        { name: 'AES-GCM', iv },
-        key,
-        data
-      );
-
-      return {
-        iv: btoa(String.fromCharCode(...iv)),
-        data: btoa(String.fromCharCode(...new Uint8Array(encrypted)))
-      };
-    }
-
-    async function decrypt(payload, key) {
-      const iv = Uint8Array.from(atob(payload.iv), c => c.charCodeAt(0));
-      const data = Uint8Array.from(atob(payload.data), c => c.charCodeAt(0));
-      const decrypted = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv },
-        key,
-        data
-      );
-      return new TextDecoder().decode(decrypted);
-    }
-
-    /* ================= 数据 ================= */
-    async function loadNotes() {
-      return (await localforage.getItem(STORAGE_KEY)) || [];
-    }
-
-    async function saveNotes(notes) {
-      await localforage.setItem(STORAGE_KEY, notes);
-    }
-
-    async function render() {
-      const list = document.getElementById('list');
-      const notes = await loadNotes();
-      list.innerHTML = '';
-
-      notes.sort((a, b) => b.time - a.time);
-
-      for (const n of notes) {
-        const li = document.createElement('li');
-        li.innerHTML = `<span class="lock">🔒 点击解密查看</span><time>${new Date(n.time).toLocaleString()}</time>`;
-        li.onclick = async () => {
-          try {
-            const pwd = await getPassword();
-            const key = await getKey(pwd);
-            const text = await decrypt(n.payload, key);
-            alert(text);
-          } catch (e) {
-            alert('密码错误或解密失败');
-          }
-        };
-        list.appendChild(li);
+      button {
+        margin: 12px 16px 0;
+        padding: 10px 14px;
+        border: none;
+        border-radius: 8px;
+        background: #000;
+        color: #fff;
+        font-size: 14px;
+        cursor: pointer;
+        -webkit-appearance: none; /* 解决 iOS 按钮样式问题 */
       }
-    }
+      ul {
+        list-style: none;
+        padding: 0;
+        margin: 12px 0 0;
+      }
+      li {
+        background: #fff;
+        margin: 8px 12px;
+        padding: 12px;
+        border-radius: 10px;
+        font-size: 14px;
+        cursor: pointer;
+      }
+      time {
+        display: block;
+        margin-top: 6px;
+        font-size: 12px;
+        color: #999;
+      }
+      .lock {
+        color: #666;
+        font-style: italic;
+      }
+      /* 弹窗样式 */
+      .modal-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.5);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 1000;
+      }
+      .modal-content {
+        background: white;
+        padding: 20px;
+        border-radius: 10px;
+        width: 85%;
+        max-width: 400px;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+      }
+      .modal-content h3 {
+        margin-top: 0;
+        font-size: 16px;
+      }
+      .modal-content input {
+        width: 100%;
+        padding: 8px;
+        margin-bottom: 12px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        box-sizing: border-box;
+        font-size: 14px;
+      }
+      .modal-content button {
+        width: 100%;
+        margin: 0;
+      }
+      /* 内容展示弹窗专属样式 */
+      #content-display {
+        white-space: pre-wrap; /* 保留换行和空格 */
+        word-wrap: break-word; /* 自动换行 */
+        max-height: 50vh; /* 最大高度为屏幕的一半 */
+        overflow-y: auto; /* 超出则滚动 */
+        padding: 10px;
+        background: #f9f9f9;
+        border: 1px solid #eee;
+        border-radius: 5px;
+        margin-bottom: 15px;
+      }
+      #content-editor {
+        width: 100%;
+        height: 50vh;
+        max-height: 300px;
+        margin-bottom: 15px;
+        padding: 10px;
+        border: 1px solid #ccc;
+        border-radius: 5px;
+        box-sizing: border-box;
+        font-size: 14px;
+        resize: vertical;
+      }
+      .modal-buttons {
+        display: flex;
+        gap: 10px; /* 按钮间距 */
+      }
+    </style>
+  </head>
+  <body>
+    <header>🔐 加密云备忘录</header>
 
-    /* ================= 新增备忘录 ================= */
-    async function addNote() {
-      const input = document.getElementById('input');
-      const text = input.value.trim();
-      if (!text) return;
+    <textarea id="input" placeholder="写完后将被加密保存..."></textarea>
+    <button id="save-button">加密保存</button>
 
-      const pwd = await getPassword();
-      const key = await getKey(pwd);
-      const payload = await encrypt(text, key);
+    <ul id="list"></ul>
 
-      const notes = await loadNotes();
-      notes.push({
-        id: Date.now(),
-        payload,
-        time: Date.now()
+    <!-- 密码输入弹窗 -->
+    <div id="password-modal" class="modal-overlay" style="display: none">
+      <div class="modal-content">
+        <h3>请输入密码</h3>
+        <input type="password" id="password-input" placeholder="首次输入即为设置密码" />
+        <button id="password-submit">确认</button>
+      </div>
+    </div>
+
+    <!-- 内容展示/编辑弹窗 -->
+    <div id="content-modal" class="modal-overlay" style="display: none">
+      <div class="modal-content">
+        <h3 id="content-modal-title">解密后的内容</h3>
+        <div id="content-display"></div>
+        <textarea id="content-editor" style="display: none"></textarea>
+        <div class="modal-buttons">
+          <button id="copy-button">复制</button>
+          <button id="edit-save-button">编辑</button>
+          <button id="close-button" style="background-color: #6c757d">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://unpkg.com/localforage/dist/localforage.js"></script>
+    <script>
+      const STORAGE_KEY = "secure_notes";
+      const SALT_KEY = "secure_notes_salt";
+
+      localforage.config({
+        name: "secure-memo",
+        storeName: "notes",
       });
 
-      await saveNotes(notes);
-      input.value = '';
-      render();
-    }
+      /* ================= 密码弹窗 ================= */
+      function showPasswordPrompt() {
+        return new Promise((resolve) => {
+          const modal = document.getElementById("password-modal");
+          const input = document.getElementById("password-input");
+          const submitBtn = document.getElementById("password-submit");
 
-    // 初始化渲染
-    render();
-  </script>
-</body>
+          modal.style.display = "flex";
+          input.focus();
+          input.value = "";
+
+          const onConfirm = () => {
+            const pwd = input.value;
+            if (pwd) {
+              modal.style.display = "none";
+              submitBtn.removeEventListener("click", onConfirm);
+              document.removeEventListener("keydown", onKeydown);
+              resolve(pwd);
+            }
+          };
+
+          const onKeydown = (e) => {
+            if (e.key === "Enter") onConfirm();
+          };
+
+          submitBtn.addEventListener("click", onConfirm);
+          document.addEventListener("keydown", onKeydown);
+        });
+      }
+
+      /* ================= 内容展示与编辑弹窗 (新) ================= */
+      function showContentModal(initialText, noteId) {
+        const modal = document.getElementById("content-modal");
+        const title = document.getElementById("content-modal-title");
+        const contentDisplay = document.getElementById("content-display");
+        const contentEditor = document.getElementById("content-editor");
+        const copyBtn = document.getElementById("copy-button");
+        const editSaveBtn = document.getElementById("edit-save-button");
+        const closeBtn = document.getElementById("close-button");
+
+        let isEditing = false;
+
+        // 重置状态
+        const setDisplayMode = (text) => {
+          isEditing = false;
+          title.textContent = "解密后的内容";
+          contentDisplay.textContent = text;
+          contentEditor.value = text;
+          contentDisplay.style.display = "block";
+          contentEditor.style.display = "none";
+          editSaveBtn.textContent = "编辑";
+          editSaveBtn.style.backgroundColor = "#000";
+          copyBtn.style.display = "block";
+        };
+
+        const setEditMode = () => {
+          isEditing = true;
+          title.textContent = "正在编辑";
+          contentDisplay.style.display = "none";
+          contentEditor.style.display = "block";
+          editSaveBtn.textContent = "保存";
+          editSaveBtn.style.backgroundColor = "#28a745"; // 绿色
+          copyBtn.style.display = "none";
+          contentEditor.focus();
+        };
+
+        setDisplayMode(initialText);
+        modal.style.display = "flex";
+
+        const cleanup = () => {
+          copyBtn.removeEventListener("click", onCopy);
+          editSaveBtn.removeEventListener("click", onEditSave);
+          closeBtn.removeEventListener("click", onClose);
+        };
+
+        const onClose = () => {
+          modal.style.display = "none";
+          cleanup();
+        };
+
+        const onCopy = () => {
+          navigator.clipboard.writeText(contentDisplay.textContent).then(() => {
+            copyBtn.textContent = "已复制!";
+            setTimeout(() => {
+              copyBtn.textContent = "复制";
+            }, 2000);
+          });
+        };
+
+        const onEditSave = async () => {
+          if (!isEditing) {
+            setEditMode();
+          } else {
+            const newText = contentEditor.value.trim();
+
+            if (newText === "") {
+              const notes = await loadNotes();
+              const updatedNotes = notes.filter((note) => note.id !== noteId);
+              await saveNotes(updatedNotes);
+              onClose();
+              render();
+              return;
+            }
+
+            try {
+              const pwd = await getPassword();
+              const key = await getKey(pwd);
+              const newPayload = await encrypt(newText, key);
+
+              const notes = await loadNotes();
+              const noteIndex = notes.findIndex((note) => note.id === noteId);
+              if (noteIndex > -1) {
+                notes[noteIndex].payload = newPayload;
+                await saveNotes(notes);
+                render();
+              }
+              setDisplayMode(newText);
+            } catch (e) {
+              console.error("保存失败:", e);
+              alert("保存失败，请重试");
+            }
+          }
+        };
+
+        copyBtn.addEventListener("click", onCopy);
+        editSaveBtn.addEventListener("click", onEditSave);
+        closeBtn.addEventListener("click", onClose);
+      }
+
+      /* ================= 密码 ================= */
+      async function getPassword() {
+        let pwd = sessionStorage.getItem("note_pwd");
+        if (!pwd) {
+          pwd = await showPasswordPrompt();
+          if (!pwd) throw new Error("需要密码");
+          sessionStorage.setItem("note_pwd", pwd);
+        }
+        return pwd;
+      }
+
+      /* ================= Key 派生 ================= */
+      async function getKey(password) {
+        let salt = await localforage.getItem(SALT_KEY);
+
+        if (!salt) {
+          salt = crypto.getRandomValues(new Uint8Array(16));
+          await localforage.setItem(SALT_KEY, salt);
+        }
+
+        if (salt instanceof ArrayBuffer) {
+          salt = new Uint8Array(salt);
+        } else if (Array.isArray(salt)) {
+          salt = new Uint8Array(salt);
+        }
+
+        const baseKey = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveKey"]);
+
+        return crypto.subtle.deriveKey(
+          {
+            name: "PBKDF2",
+            salt,
+            iterations: 100000,
+            hash: "SHA-256",
+          },
+          baseKey,
+          { name: "AES-GCM", length: 256 },
+          false,
+          ["encrypt", "decrypt"]
+        );
+      }
+
+      /* ================= 加解密 ================= */
+      async function encrypt(text, key) {
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const data = new TextEncoder().encode(text);
+        const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, data);
+
+        return {
+          iv: btoa(String.fromCharCode(...iv)),
+          data: btoa(String.fromCharCode(...new Uint8Array(encrypted))),
+        };
+      }
+
+      async function decrypt(payload, key) {
+        const iv = Uint8Array.from(atob(payload.iv), (c) => c.charCodeAt(0));
+        const data = Uint8Array.from(atob(payload.data), (c) => c.charCodeAt(0));
+        const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, data);
+        return new TextDecoder().decode(decrypted);
+      }
+
+      /* ================= 数据 ================= */
+      async function loadNotes() {
+        return (await localforage.getItem(STORAGE_KEY)) || [];
+      }
+
+      async function saveNotes(notes) {
+        await localforage.setItem(STORAGE_KEY, notes);
+      }
+
+      async function render() {
+        const list = document.getElementById("list");
+        const notes = await loadNotes();
+        list.innerHTML = "";
+
+        notes.sort((a, b) => b.time - a.time);
+
+        for (const n of notes) {
+          const li = document.createElement("li");
+          li.innerHTML = `<span class="lock">🔒 点击解密查看</span><time>${new Date(n.time).toLocaleString()}</time>`;
+          li.onclick = async () => {
+            try {
+              const pwd = await getPassword();
+              const key = await getKey(pwd);
+              const text = await decrypt(n.payload, key);
+              showContentModal(text, n.id);
+            } catch (e) {
+              console.error(e);
+              alert("密码错误或解密失败");
+              sessionStorage.removeItem("note_pwd");
+            }
+          };
+          list.appendChild(li);
+        }
+      }
+
+      /* ================= 新增备忘录 ================= */
+      async function addNote() {
+        const input = document.getElementById("input");
+        const text = input.value.trim();
+        if (!text) return;
+
+        try {
+          const pwd = await getPassword();
+          const key = await getKey(pwd);
+          const payload = await encrypt(text, key);
+
+          const notes = await loadNotes();
+          notes.push({
+            id: Date.now(),
+            payload,
+            time: Date.now(),
+          });
+
+          await saveNotes(notes);
+          input.value = "";
+          render();
+        } catch (e) {
+          console.error(e);
+          alert("加密失败，请重试");
+        }
+      }
+
+      // 初始化
+      document.getElementById("save-button").addEventListener("click", addNote);
+      render();
+    </script>
+  </body>
 </html>
