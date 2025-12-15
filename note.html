@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>加密云备忘录</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f7f7f7;
+    }
+    header {
+      padding: 12px 16px;
+      background: #ffffff;
+      font-weight: 600;
+      box-shadow: 0 1px 4px rgba(0,0,0,.06);
+    }
+    textarea {
+      width: 100%;
+      height: 120px;
+      border: none;
+      outline: none;
+      padding: 16px;
+      box-sizing: border-box;
+      font-size: 16px;
+      resize: none;
+    }
+    button {
+      margin: 12px 16px 0;
+      padding: 10px 14px;
+      border: none;
+      border-radius: 8px;
+      background: #000;
+      color: #fff;
+      font-size: 14px;
+    }
+    ul {
+      list-style: none;
+      padding: 0;
+      margin: 12px 0 0;
+    }
+    li {
+      background: #fff;
+      margin: 8px 12px;
+      padding: 12px;
+      border-radius: 10px;
+      font-size: 14px;
+    }
+    time {
+      display: block;
+      margin-top: 6px;
+      font-size: 12px;
+      color: #999;
+    }
+    .lock {
+      color: #666;
+      font-style: italic;
+    }
+  </style>
+</head>
+<body>
+  <header>🔐 加密云备忘录</header>
+
+  <textarea id="input" placeholder="写完后将被加密保存..."></textarea>
+  <button onclick="addNote()">加密保存</button>
+
+  <ul id="list"></ul>
+
+  <script src="https://unpkg.com/localforage/dist/localforage.js"></script>
+  <script>
+    const STORAGE_KEY = 'secure_notes';
+    const SALT_KEY = 'secure_notes_salt';
+
+    localforage.config({
+      name: 'secure-memo',
+      storeName: 'notes'
+    });
+
+    /* ================= 密码 ================= */
+    async function getPassword() {
+      let pwd = sessionStorage.getItem('note_pwd');
+      if (!pwd) {
+        pwd = prompt('请输入解密密码（首次即为设置密码）');
+        if (!pwd) throw new Error('需要密码');
+        sessionStorage.setItem('note_pwd', pwd);
+      }
+      return pwd;
+    }
+
+    /* ================= Key 派生（修复版） ================= */
+    async function getKey(password) {
+      let salt = await localforage.getItem(SALT_KEY);
+
+      if (!salt) {
+        salt = crypto.getRandomValues(new Uint8Array(16));
+        await localforage.setItem(SALT_KEY, salt);
+      }
+
+      // 兼容 localForage 不同 driver 的返回类型
+      if (salt instanceof ArrayBuffer) {
+        salt = new Uint8Array(salt);
+      } else if (Array.isArray(salt)) {
+        salt = new Uint8Array(salt);
+      }
+
+      const baseKey = await crypto.subtle.importKey(
+        'raw',
+        new TextEncoder().encode(password),
+        'PBKDF2',
+        false,
+        ['deriveKey']
+      );
+
+      return crypto.subtle.deriveKey(
+        {
+          name: 'PBKDF2',
+          salt,
+          iterations: 100000,
+          hash: 'SHA-256'
+        },
+        baseKey,
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['encrypt', 'decrypt']
+      );
+    }
+
+    /* ================= 加解密 ================= */
+    async function encrypt(text, key) {
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const data = new TextEncoder().encode(text);
+      const encrypted = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv },
+        key,
+        data
+      );
+
+      return {
+        iv: btoa(String.fromCharCode(...iv)),
+        data: btoa(String.fromCharCode(...new Uint8Array(encrypted)))
+      };
+    }
+
+    async function decrypt(payload, key) {
+      const iv = Uint8Array.from(atob(payload.iv), c => c.charCodeAt(0));
+      const data = Uint8Array.from(atob(payload.data), c => c.charCodeAt(0));
+      const decrypted = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv },
+        key,
+        data
+      );
+      return new TextDecoder().decode(decrypted);
+    }
+
+    /* ================= 数据 ================= */
+    async function loadNotes() {
+      return (await localforage.getItem(STORAGE_KEY)) || [];
+    }
+
+    async function saveNotes(notes) {
+      await localforage.setItem(STORAGE_KEY, notes);
+    }
+
+    async function render() {
+      const list = document.getElementById('list');
+      const notes = await loadNotes();
+      list.innerHTML = '';
+
+      notes.sort((a, b) => b.time - a.time);
+
+      for (const n of notes) {
+        const li = document.createElement('li');
+        li.innerHTML = `<span class="lock">🔒 点击解密查看</span><time>${new Date(n.time).toLocaleString()}</time>`;
+        li.onclick = async () => {
+          try {
+            const pwd = await getPassword();
+            const key = await getKey(pwd);
+            const text = await decrypt(n.payload, key);
+            alert(text);
+          } catch (e) {
+            alert('密码错误或解密失败');
+          }
+        };
+        list.appendChild(li);
+      }
+    }
+
+    /* ================= 新增备忘录 ================= */
+    async function addNote() {
+      const input = document.getElementById('input');
+      const text = input.value.trim();
+      if (!text) return;
+
+      const pwd = await getPassword();
+      const key = await getKey(pwd);
+      const payload = await encrypt(text, key);
+
+      const notes = await loadNotes();
+      notes.push({
+        id: Date.now(),
+        payload,
+        time: Date.now()
+      });
+
+      await saveNotes(notes);
+      input.value = '';
+      render();
+    }
+
+    // 初始化渲染
+    render();
+  </script>
+</body>
+</html>
